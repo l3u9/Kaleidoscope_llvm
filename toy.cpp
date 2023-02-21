@@ -12,21 +12,22 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Scalar/GVN.h"
-#include "llvm/Transforms/Utils.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Host.h"
 #include <algorithm>
 #include <cassert>
 #include <cctype>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -649,8 +650,8 @@ static std::unique_ptr<LLVMContext> TheContext;
 static std::unique_ptr<Module> TheModule;
 static std::unique_ptr<IRBuilder<>> Builder;
 static std::map<std::string, AllocaInst *> NamedValues;
-static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
-static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+// static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
+// static std::unique_ptr<KaleidoscopeJIT> TheJIT;
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 static ExitOnError ExitOnErr;
 
@@ -964,7 +965,7 @@ Function *FunctionAST::codegen()
 
         verifyFunction(*TheFunction);
 
-        TheFPM->run(*TheFunction);
+        // TheFPM->run(*TheFunction);
         return TheFunction;
     }
 
@@ -986,19 +987,19 @@ static void InitializeModuleAndPassManager()
 
     Builder = std::make_unique<IRBuilder<>>(*TheContext);
 
-    TheFPM = std::make_unique<legacy::FunctionPassManager>(TheModule.get());
+    // TheFPM = std::make_unique<legacy::FunctionPassManager>(TheModule.get());
 
-    TheFPM->add(createPromoteMemoryToRegisterPass());
+    // TheFPM->add(createPromoteMemoryToRegisterPass());
 
-    TheFPM->add(createInstructionCombiningPass());
+    // TheFPM->add(createInstructionCombiningPass());
 
-    TheFPM->add(createReassociatePass());
+    // TheFPM->add(createReassociatePass());
 
-    TheFPM->add(createGVNPass());
+    // TheFPM->add(createGVNPass());
 
-    TheFPM->add(createCFGSimplificationPass());
+    // TheFPM->add(createCFGSimplificationPass());
 
-    TheFPM->doInitialization();
+    // TheFPM->doInitialization();
 }
 
 
@@ -1011,8 +1012,8 @@ static void HandleDefinition()
             fprintf(stderr, "Read function definition:");
             FnIR->print(errs());
             fprintf(stderr, "\n");
-            ExitOnErr(TheJIT->addModule(ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
-            InitializeModuleAndPassManager();
+            // ExitOnErr(TheJIT->addModule(ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
+            // InitializeModuleAndPassManager();
         }
     }
     else
@@ -1044,21 +1045,22 @@ static void HandleTopLevelExpression()
 {
     if(auto FnAST = ParseTopLevelExpr())
     {
-        if(FnAST->codegen())
-        {
-            auto RT = TheJIT->getMainJITDylib().createResourceTracker();
+        FnAST->codegen();
+        // if(FnAST->codegen())
+        // {
+        //     auto RT = TheJIT->getMainJITDylib().createResourceTracker();
 
-            auto TSM = ThreadSafeModule(std::move(TheModule), std::move(TheContext));
-            ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
-            InitializeModuleAndPassManager();
+        //     auto TSM = ThreadSafeModule(std::move(TheModule), std::move(TheContext));
+        //     ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
+        //     InitializeModuleAndPassManager();
 
-            auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
+        //     auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
 
-            double (*FP)() = (double (*)())(intptr_t)ExprSymbol.getAddress();
-            fprintf(stderr, "Evaluated to %f\n", FP());
+        //     double (*FP)() = (double (*)())(intptr_t)ExprSymbol.getAddress();
+        //     fprintf(stderr, "Evaluated to %f\n", FP());
 
-            ExitOnErr(RT->remove());
-        }
+        //     ExitOnErr(RT->remove());
+        // }
     }
     else
     {
@@ -1122,14 +1124,66 @@ int main()
     BinopPrecedence['-'] = 20;
     BinopPrecedence['*'] = 40;
 
+
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
+    // TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
 
     InitializeModuleAndPassManager();
 
     MainLoop();
+
+    InitializeAllTargetInfos();
+    InitializeAllTargets();
+    InitializeAllTargetMCs();
+    InitializeAllAsmParsers();
+    InitializeAllAsmPrinters();
+
+    auto TargetTriple = sys::getDefaultTargetTriple();
+    TheModule->setTargetTriple(TargetTriple);
+
+    std::string Error;
+    auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
+
+    if(!Target)
+    {
+        errs() << Error;
+        return 1;
+    }
+
+    auto CPU = "generic";
+    auto Features = "";
+
+    TargetOptions opt;
+    auto RM = std::optional<Reloc::Model>();
+    auto TheTargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
+    
+    TheModule->setDataLayout(TheTargetMachine->createDataLayout());
+
+    auto Filename = "output.o";
+    std::error_code EC;
+    raw_fd_ostream dest(Filename, EC, sys::fs::OF_None);
+
+    if(EC)
+    {
+        errs() << "Could not open file: " << EC.message();
+        return 1;
+    }
+
+    legacy::PassManager pass;
+    auto FileType = CGFT_ObjectFile;
+
+    if(TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType))
+    {
+        errs() << "TheTargetMachine can't emit a file of this type";
+        return 1;
+    }
+
+    pass.run(*TheModule);
+    dest.flush();
+
+    outs() << "Wrote" << Filename << "\n";
 
     return 0;
 }
