@@ -8,11 +8,16 @@
 #include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/ExecutorProcessControl.h"
 #include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
+#include "llvm/ExecutionEngine/Orc/IRTransformLayer.h"
 #include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
 #include <memory>
 
 namespace llvm {
@@ -77,6 +82,25 @@ class KaleidoscopeJIT
         Expected<JITEvaluatedSymbol> lookup(StringRef Name)
         {
             return ES->lookup({&MainJD}, Mangle(Name.str()));
+        }
+
+    private:
+        static Expected<ThreadSafeModule> optimizeModule(ThreadSafeModule TSM, const MaterializationResponsibility &R)
+        {
+            TSM.withModuleDo([](Module &M)
+            {
+                auto FPM = std::make_unique<legacy::FunctionPassManager>(&M);
+
+                FPM->add(createInstructionCombiningPass());
+                FPM->add(createReassociatePass());
+                FPM->add(createGVNPass());
+                FPM->add(createCFGSimplificationPass());
+                FPM->doInitialization();
+
+                for(auto &F : M)
+                    FPM->run(F);
+            });
+            return std::move(TSM);
         }
 };
 
