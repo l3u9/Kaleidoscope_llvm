@@ -22,8 +22,93 @@
 #include "llvm/Transforms/Scalar/GVN.h"
 #include <memory>
 
+
+class PrototypeAST;
+class ExprAST;
+
+class FunctionAST
+{
+    std::unique_ptr<PrototypeAST> Proto;
+    std::unique_ptr<ExprAST> Body;
+
+    public:
+        FunctionAST(std::unique_ptr<PrototypeAST> Proto, std::unique_ptr<ExprAST> Body)
+        : Proto(std::move(Proto)), Body(std::move(Body)) {}
+
+        const PrototypeAST &getProto() const;
+        const std::string &getName() const;
+        llvm::Function *codegen();
+};
+
+llvm::orc::ThreadSafeModule irgenAndTakeOwnership(FunctionAST &FnAST, const std::string &Suffix);
+
+
 namespace llvm {
 namespace orc {
+
+class KaleidoscopeASTLayer;
+class KaleidoscopeJIT;
+
+class KaleidoscopeASTMaterializationUnit : public MaterializationUnit
+{
+    public:
+        KaleidoscopeASTMaterializationUnit(KaleidoscopeASTLayer &L, std::unique_ptr<FunctionAST> F);
+
+        StringRef getName() const override 
+        {
+            return "KaleidoscopeASTMaterializationUnit";
+        }
+
+        void materialize(std::unique_ptr<MaterializationResponsibility> R) override;
+    
+    private:
+        void discard(const JITDylib &JD, const SymbolStringPtr &Sym) override
+        {
+            llvm_unreachable("Kaleidoscope functions are not overridable");
+        }
+
+        KaleidoscopeASTLayer &L;
+        std::unique_ptr<FunctionAST> F;
+};
+
+class KaleidoscopeASTLayer  
+{
+    public:
+        KaleidoscopeASTLayer(IRLayer &BaseLayer, const DataLayout &DL) : BaseLayer(BaseLayer), DL(DL) {}
+
+        Error add(ResourceTrackerSP RT, std::unique_ptr<FunctionAST> F)
+        {
+            return RT->getJITDylib().define(
+                std::make_unique<KaleidoscopeASTMaterializationUnit>(*this, std::move(F)), RT
+            );
+        }
+
+        void emit(std::unique_ptr<MaterializationResponsibility> MR, std::unique_ptr<FunctionAST> F)
+        {
+            BaseLayer.emit(std::move(MR), irgenAndTakeOwnership(*F, ""));
+        }
+
+        MaterializationUnit::Interface getInterface(FunctionAST &F)
+        {
+            MangleAndInterner Mangle(BaseLayer.getExecutionSession(), DL);
+            SymbolFlagsMap Symbols;
+            Symbols[Mangle(F.getName())] = JITSymbolFlags(JITSymbolFlags::Exported | JITSymbolFlags::Callable);
+            return MaterializationUnit::Interface(std::move(Symbols), nullptr);
+        }
+
+    private:
+        IRLayer &BaseLayer;
+        const DataLayout &DL;
+                
+};
+
+KaleidoscopeASTMaterializationUnit::KaleidoscopeASTMaterializationUnit(KaleidoscopeASTLayer &L, std::unique_ptr<FunctionAST> F)
+    : MaterializationUnit(L.getInterface(*F)), L(L), F(std::move(F)) {}
+
+void KaleidoscopeASTMaterializationUnit::materialize(std::unique_ptr<MaterializationResponsibility> R) 
+{
+  L.emit(std::move(R), std::move(F));
+}
 
 class KaleidoscopeJIT
 {
@@ -90,7 +175,7 @@ class KaleidoscopeJIT
             if(!DL)
                 return DL.takeError();
             
-            return std::make_unique<KaleidoscopeJIT>(std::move(ES), std::move(JTMB), std::move(*DL));
+            return std::make_unique<KaleidoscopeJIT>(std::move(ES), std::move(*EPCIU), std::move(JTMB), std::move(*DL));
         }
         
         const DataLayout &getDataLayout() const {return DL;}
